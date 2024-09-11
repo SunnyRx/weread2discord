@@ -2,8 +2,6 @@
 
 每天从微信读书中抽出 5 条划线或笔记，通过 Webhook 发送到 Discord 中。
 
-[![built with Codeium](https://codeium.com/badges/main)](https://codeium.com)
-
 ## 感谢
 
 灵感出自 **Readwise** 的**每日邮件回顾**。
@@ -26,3 +24,10 @@
     * 添加以下变量
         * WEREAD_COOKIE
         * DISCORD_WEBHOOK_URL
+
+## 预览图
+
+![Demo](demo.jpg)
+
+---
+[![built with Codeium](https://codeium.com/badges/main)](https://codeium.com)
