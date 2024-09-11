@@ -296,7 +296,7 @@ if __name__ == "__main__":
         if (memos != []):
             count = 5
 
-            message = f"早上好！\n 以下是今天为您挑选的 {count} 条读书笔记：\n\n"
+            message = f"主人，早上好！\n 以下是今天为您挑选的 {count} 条读书笔记：\n\n"
 
             lottoyMemos = random.sample(memos, k=min(count, len(memos)))
 
