@@ -11,10 +11,9 @@
 ## 使用
 
 1. Fork 这个工程
-2. 获取微信读书的 Cookie
-    * 浏览器打开 https://weread.qq.com/
-    * 微信扫码登录确认，提示没有权限忽略即可
-    * 按F12进入开发者模式，依次点「Network」->「Doc」->「Headers」->「cookie」，复制 Cookie 字符串
+2. 获取微信读书的 API Key
+    * 打开 [https://weread.qq.com/r/weread-skills](https://weread.qq.com/r/weread-skills)（或在微信读书 App 内的「微信读书 Skill」页面）
+    * 登录微信读书账号，生成并复制 API Key（`wrk-` 开头，长期有效，无需像 Cookie 一样反复更新）
 3. 获取 Discord 的 Webhook URL
     * 打开要发送消息的 Discord 服务器或频道（需要管理员或拥有者权限）
     * 打开服务器设置或频道设置
@@ -22,7 +21,7 @@
 4. 在 GitHub 的 Secrets 中添加变量
     * 打开第一步 Fork 的工程，点击「Settings」->「Secrets and variables」->「New repository secret」
     * 添加以下变量
-        * WEREAD_COOKIE
+        * WEREAD_API_KEY
         * DISCORD_WEBHOOK_URL
 
 ## 预览图

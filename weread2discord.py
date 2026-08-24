@@ -1,333 +1,171 @@
 import argparse
-import os
-import requests
-from requests.utils import cookiejar_from_dict
-from http.cookies import SimpleCookie
 import random
-import json
+import time
 
-WEREAD_URL = "https://weread.qq.com/"
-WEREAD_NOTEBOOKS_URL = "https://i.weread.qq.com/user/notebooks"
-WEREAD_BOOKMARKLIST_URL = "https://i.weread.qq.com/book/bookmarklist"
-WEREAD_CHAPTER_INFO = "https://i.weread.qq.com/book/chapterInfos"
-WEREAD_REVIEW_LIST_URL = "https://i.weread.qq.com/review/list"
+import requests
 
+GATEWAY_URL = "https://i.weread.qq.com/api/agent/gateway"
+SKILL_VERSION = "1.0.4"
 
-def parse_cookie_string(cookie_string):
-    cookie = SimpleCookie()
-    cookie.load(cookie_string)
-    cookies_dict = {}
-    cookiejar = None
-    for key, morsel in cookie.items():
-        cookies_dict[key] = morsel.value
-        cookiejar = cookiejar_from_dict(
-            cookies_dict, cookiejar=None, overwrite=True
-        )
-    return cookiejar
+# Discord embed 的 description 上限是 4096 字符
+MAX_MEMO_CHARS = 600
+MAX_MESSAGE_CHARS = 3800
 
 
-def get_bookmark_list(bookId):
-    """获取我的划线"""
-    params = dict(bookId=bookId)
-    r = session.get(WEREAD_BOOKMARKLIST_URL, params=params)
-    if r.ok:
-        updated = r.json().get("updated")
-        updated = sorted(updated, key=lambda x: (
-            x.get("chapterUid", 1), int(x.get("range").split("-")[0])))
-        return r.json()["updated"]
-    return None
-
-
-def get_review_list(bookId):
-    """获取笔记"""
-    params = dict(bookId=bookId, listType=11, mine=1, syncKey=0)
-    r = session.get(WEREAD_REVIEW_LIST_URL, params=params)
-    reviews = r.json().get("reviews")
-    summary = list(filter(lambda x: x.get("review").get("type") == 4, reviews))
-    reviews = list(filter(lambda x: x.get("review").get("type") == 1, reviews))
-    reviews = list(map(lambda x: x.get("review"), reviews))
-    reviews = list(map(lambda x: {**x, "markText": x.pop("content")}, reviews))
-    return summary, reviews
-
-
-def get_table_of_contents():
-    """获取目录"""
-    return {
-        "type": "table_of_contents",
-        "table_of_contents": {
-            "color": "default"
-        }
+def call_gateway(api_key, api_name, **params):
+    """调用微信读书 Agent API 网关"""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
+    body = {"api_name": api_name, "skill_version": SKILL_VERSION, **params}
+    for attempt in range(1, 4):
+        try:
+            r = requests.post(GATEWAY_URL, json=body, headers=headers, timeout=30)
+            if r.ok:
+                data = r.json()
+                if data.get("errcode") == 0:
+                    if data.get("upgrade_info"):
+                        print(f"微信读书 API 提示：{data['upgrade_info']}")
+                    return data
+                error = f"errcode {data.get('errcode')}：{data.get('errmsg', '')}"
+            elif r.status_code == 401:
+                # 鉴权失败重试也不会成功，直接报配置错误
+                raise RuntimeError(
+                    f"微信读书 API 鉴权失败（{r.text[:200]}），请检查 API Key 是否正确。")
+            else:
+                error = f"HTTP {r.status_code}：{r.text[:200]}"
+        except requests.RequestException as err:
+            error = str(err)
+        print(f"调用 {api_name} 失败（第 {attempt} 次）：{error}")
+        if attempt < 3:
+            time.sleep(5)
+    raise RuntimeError(f"调用 {api_name} 连续 3 次失败，已放弃。")
 
 
-def get_heading(level, content):
-    if level == 1:
-        heading = "heading_1"
-    elif level == 2:
-        heading = "heading_2"
-    else:
-        heading = "heading_3"
-    return {
-        "type": heading,
-        heading: {
-            "rich_text": [{
-                "type": "text",
-                "text": {
-                    "content": content,
-                }
-            }],
-            "color": "default",
-            "is_toggleable": False
-        }
+def get_notebooklist(api_key):
+    """获取笔记本列表，按 lastSort 游标翻页取全"""
+    books = []
+    last_sort = None
+    while True:
+        params = {"count": 20}
+        if last_sort is not None:
+            params["lastSort"] = last_sort
+        data = call_gateway(api_key, "/user/notebooks", **params)
+        page = data.get("books", [])
+        books.extend(page)
+        if data.get("hasMore") != 1 or not page:
+            break
+        last_sort = page[-1].get("sort")
+        if last_sort is None:
+            break
+    books.sort(key=lambda x: x.get("sort", 0))
+    return books
+
+
+def get_bookmark_list(api_key, bookId):
+    """获取我在一本书里的划线"""
+    data = call_gateway(api_key, "/book/bookmarklist", bookId=bookId)
+    return data.get("updated", [])
+
+
+def get_review_list(api_key, bookId):
+    """获取我在一本书里的笔记，按 synckey 翻页取全"""
+    reviews = []
+    synckey = 0
+    while True:
+        data = call_gateway(api_key, "/review/list/mine",
+                            bookid=bookId, synckey=synckey, count=100)
+        page = data.get("reviews", [])
+        reviews.extend(page)
+        next_synckey = data.get("synckey", synckey)
+        if data.get("hasMore") != 1 or not page or next_synckey == synckey:
+            break
+        synckey = next_synckey
+    return reviews
+
+
+def highlight_emoji(item):
+    # 直线 style=0，背景颜色是 1，波浪线是 2；带 reviewId 说明是笔记
+    if item.get("reviewId") is not None:
+        return "✍️"
+    if item.get("style") == 0:
+        return "💡"
+    if item.get("style") == 1:
+        return "⭐"
+    return "🌟"
+
+
+def collect_memos(api_key, books):
+    """把所有书的划线和笔记摊平成（书名， 引用原文， 作者， 正文）元组"""
+    memos = []
+    for i, notebook in enumerate(books, start=1):
+        book = notebook.get("book", {})
+        title = book.get("title")
+        author = book.get("author")
+        bookId = book.get("bookId")
+        print(f"正在同步 {title}，一共 {len(books)} 本，当前是第 {i} 本。")
+        for item in get_bookmark_list(api_key, bookId):
+            markText = item.get("markText")
+            if not markText:
+                continue
+            memos.append(
+                (title, None, author, f"{highlight_emoji(item)} {markText}"))
+        for item in get_review_list(api_key, bookId):
+            review = item.get("review", {})
+            content = review.get("content")
+            if not content:
+                continue
+            abstract = review.get("abstract")
+            memos.append(
+                (title, abstract or None, author, f"✍️ {content}"))
+    return memos
+
+
+def build_message(memos):
+    count = 5
+    picked = random.sample(memos, k=min(count, len(memos)))
+    body = ""
+    used = 0
+    for title, quote_text, author, text in picked:
+        memo = text if len(text) <= MAX_MEMO_CHARS else text[:MAX_MEMO_CHARS] + "…"
+        if quote_text:
+            quote = quote_text if len(quote_text) <= MAX_MEMO_CHARS else quote_text[:MAX_MEMO_CHARS] + "…"
+            memo += f"\n> {quote}"
+        memo += f"\n—— 《{title}》（{author}）\n\n"
+        if len(body) + len(memo) > MAX_MESSAGE_CHARS:
+            break
+        body += memo
+        used += 1
+    return f"主人，早上好！\n 以下是今天为您挑选的 {used} 条读书笔记：\n\n{body}"
+
+
+def send_to_discord(webhook_url, memos):
+    message = build_message(memos)
+    embed = {
+        "title": "我的读书笔记随选",
+        "description": message,
+        "color": 2763306
     }
-
-
-def get_quote(content):
-    return {
-        "type": "quote",
-        "quote": {
-            "rich_text": [{
-                "type": "text",
-                "text": {
-                    "content": content
-                },
-            }],
-            "color": "default"
-        }
-    }
-
-
-def get_callout(content, style, colorStyle, reviewId):
-    # 根据不同的划线样式设置不同的emoji 直线type=0 背景颜色是1 波浪线是2
-    emoji = "🌟"
-    if style == 0:
-        emoji = "💡"
-    elif style == 1:
-        emoji = "⭐"
-    # 如果reviewId不是空说明是笔记
-    if reviewId != None:
-        emoji = "✍️"
-    color = "default"
-    # 根据划线颜色设置文字的颜色
-    if colorStyle == 1:
-        color = "red"
-    elif colorStyle == 2:
-        color = "purple"
-    elif colorStyle == 3:
-        color = "blue"
-    elif colorStyle == 4:
-        color = "green"
-    elif colorStyle == 5:
-        color = "yellow"
-    return {
-        "type": "callout",
-        "callout": {
-            "rich_text": [{
-                "type": "text",
-                "text": {
-                    "content": content,
-                }
-            }],
-            "icon": {
-                "emoji": emoji
-            },
-            "color": color
-        }
-    }
-
-
-def get_chapter_info(bookId):
-    """获取章节信息"""
-    body = {
-        'bookIds': [bookId],
-        'synckeys': [0],
-        'teenmode': 0
-    }
-    r = session.post(WEREAD_CHAPTER_INFO, json=body)
-    if r.ok and "data" in r.json() and len(r.json()["data"]) == 1 and "updated" in r.json()["data"][0]:
-        update = r.json()["data"][0]["updated"]
-        return {item["chapterUid"]: item for item in update}
-    return None
-
-
-def get_notebooklist():
-    """获取笔记本列表"""
-    r = session.get(WEREAD_NOTEBOOKS_URL)
-    if r.ok:
-        data = r.json()
-        books = data.get("books")
-        books.sort(key=lambda x: x["sort"])
-        return books
-    else:
-        print(r.text)
-    return None
-
-
-def get_children(chapter, summary, bookmark_list):
-    children = []
-    grandchild = {}
-    if chapter != None:
-        # 添加目录
-        children.append(get_table_of_contents())
-        d = {}
-        for data in bookmark_list:
-            chapterUid = data.get("chapterUid", 1)
-            if (chapterUid not in d):
-                d[chapterUid] = []
-            d[chapterUid].append(data)
-        for key, value in d.items():
-            if key in chapter:
-                # 添加章节
-                children.append(get_heading(
-                    chapter.get(key).get("level"), chapter.get(key).get("title")))
-            for i in value:
-                markText = i.get("markText")
-                for j in range(0, len(markText)//2000+1):
-                    children.append(get_callout(markText[j*2000:(j+1)*2000],i.get("style"), i.get("colorStyle"), i.get("reviewId")))
-                if i.get("abstract") != None and i.get("abstract") != "":
-                    quote = get_quote(i.get("abstract"))
-                    grandchild[len(children)-1] = quote
-
-    else:
-        # 如果没有章节信息
-        for data in bookmark_list:
-            markText = data.get("markText")
-            for i in range(0, len(markText)//2000+1):
-                children.append(get_callout(markText[i*200:(i+1)*2000],
-                                data.get("style"), data.get("colorStyle"), data.get("reviewId")))
-    if summary != None and len(summary) > 0:
-        children.append(get_heading(1, "点评"))
-        for i in summary:
-            content = i.get("review").get("content")
-            for j in range(0, len(content)//2000+1):
-                children.append(get_callout(content[j*2000:(j+1)*2000], i.get(
-                    "style"), i.get("colorStyle"), i.get("review").get("reviewId")))
-    return children, grandchild
-
-
-def get_webhook_url():
-    file_dir = os.path.dirname(os.path.realpath('__file__'))
-    
-    config_file_path = os.path.join(file_dir, "config.json")
-    webhook_url = ""
-
-    with open(config_file_path, "r") as config_file:
-        config = json.load(config_file)
-        if "webhookUrl" in config:
-            webhook_url = config["webhookUrl"]
-
-    if webhook_url == "":
-        print("无法读取 Discord Webhook URL。\n请检查配置文件。")
-        exit()
-
-    return webhook_url
-
-
-def get_weread_cookie():
-    file_dir = os.path.dirname(os.path.realpath('__file__'))
-    
-    config_file_path = os.path.join(file_dir, "config.json")
-    weread_cookie = ""
-
-    with open(config_file_path, "r") as config_file:
-        config = json.load(config_file)
-        if "wereadCookie" in config:
-            weread_cookie = config["wereadCookie"]
-
-    if weread_cookie == "":
-        print("无法读取 Weread Cookie。\n请检查配置文件。")
-        exit()
-
-    return weread_cookie
+    response = requests.post(
+        webhook_url, json={"content": "", "embeds": [embed]}, timeout=30)
+    response.raise_for_status()
+    print("Payload delivered successfully, code {}.".format(
+        response.status_code))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("weread_cookie")
+    parser.add_argument("weread_api_key")
     parser.add_argument("discord_webhook_url")
     options = parser.parse_args()
-    if options.weread_cookie != None:
-        weread_cookie = options.weread_cookie
+
+    if not options.weread_api_key.startswith("wrk-"):
+        print("警告：微信读书 API Key 通常以 wrk- 开头，请确认是否复制完整。")
+
+    books = get_notebooklist(options.weread_api_key)
+    memos = collect_memos(options.weread_api_key, books)
+    if not memos:
+        print("没有获取到任何划线或笔记。")
     else:
-        print("argparse 中没有传入 Weread Cookie")
-        weread_cookie = get_weread_cookie()
-    if options.discord_webhook_url != None:
-        webhook_url = options.discord_webhook_url
-    else:
-        print("argparse 中没有传入 Discord Webhook URL")
-        webhook_url = get_webhook_url()
-    session = requests.Session()
-    session.cookies = parse_cookie_string(weread_cookie)
-    session.get(WEREAD_URL)
-    books = get_notebooklist()
-
-    i = 0
-    memos = []
-    if (books != None):
-        for book in books:
-            i +=1
-            book = book.get("book")
-            title = book.get("title")
-            author = book.get("author")
-            bookId = book.get("bookId")
-            print(f"正在同步 {title} ,一共{len(books)}本，当前是第{i}本。")
-            chapter = get_chapter_info(bookId)
-            bookmark_list = get_bookmark_list(bookId)
-            summary, reviews = get_review_list(bookId)
-            bookmark_list.extend(reviews)
-            bookmark_list = sorted(bookmark_list, key=lambda x: (
-                x.get("chapterUid", 1), 0 if (x.get("range", "") == "" or x.get("range").split("-")[0]=="" ) else int(x.get("range").split("-")[0])))
-            children, grandchild = get_children(
-                chapter, summary, bookmark_list)
-
-            for child in children:
-                if child.get("type") == "callout":
-                    callout = child.get("callout")
-                    emoji = callout.get("icon", {}).get("emoji")
-                    rich_text = callout.get("rich_text", [])
-                    content = next((t.get("text", {}).get("content") for t in rich_text), None)
-                    text = emoji + " " + content
-                    quote_text = None
-                    if grandchild.get(children.index(child)):
-                        quote_text = grandchild.get(children.index(child)).get("quote").get("rich_text", [{}])[0].get("text", {}).get("content")
-                    if text:
-                        memos.append((title, quote_text, author, text))
-
-        if (memos != []):
-            count = 5
-
-            message = f"主人，早上好！\n 以下是今天为您挑选的 {count} 条读书笔记：\n\n"
-
-            lottoyMemos = random.sample(memos, k=min(count, len(memos)))
-
-            for memo in lottoyMemos:
-                title, quote_text, author, text = memo
-                message += f"{text}\n"
-                if quote_text != None and quote_text != "":
-                    message += f"> {quote_text}\n"
-                message += f"—— 《{title}》（{author})\n\n"
-
-            embed = {
-                "title": "我的读书笔记随选",
-                "description": message,
-                "color": 2763306
-            }
-
-            embeds = [embed]
-
-            content = {
-                "content": "",
-                "embeds": embeds
-            }
-
-            json_data = json.dumps(content)
-
-            response = requests.post(webhook_url, json=content)
-
-            try:
-                response.raise_for_status()
-            except response.exceptions.HTTPError as err:
-                print(err)
-            else:
-                print("Payload delivered successfully, code {}.".format(response.status_code))
-
+        send_to_discord(options.discord_webhook_url, memos)
