@@ -24,11 +24,13 @@ def call_gateway(api_key, api_name, **params):
             r = requests.post(GATEWAY_URL, json=body, headers=headers, timeout=30)
             if r.ok:
                 data = r.json()
-                if data.get("errcode") == 0:
-                    if data.get("upgrade_info"):
-                        print(f"微信读书 API 提示：{data['upgrade_info']}")
+                if data.get("upgrade_info"):
+                    raise RuntimeError(
+                        f"微信读书 skill 需要升级：{data['upgrade_info']}")
+                # 成功响应可能不带 errcode 字段（数据平铺在顶层），缺省按 0 处理
+                if data.get("errcode", 0) == 0:
                     return data
-                error = f"errcode {data.get('errcode')}：{data.get('errmsg', '')}"
+                error = f"errcode {data.get('errcode')}：{data.get('errmsg') or str(data)[:200]}"
             elif r.status_code == 401:
                 # 鉴权失败重试也不会成功，直接报配置错误
                 raise RuntimeError(
