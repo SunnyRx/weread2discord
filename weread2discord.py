@@ -1,11 +1,16 @@
 import argparse
+import os
 import random
 import time
 
 import requests
 
 GATEWAY_URL = "https://i.weread.qq.com/api/agent/gateway"
-SKILL_VERSION = "1.0.4"
+# 微信读书要求每次请求都带上 SKILL 版本号，服务端据此校验更新。
+# 官方升级包（upgrade_info.upgrade_url）里的最新版若不是这个值，网关会返回
+# upgrade_info 并拒绝请求，需要同步更新此处。
+# 可用环境变量 WEREAD_SKILL_VERSION 覆盖，便于不改代码先跟进新版。
+SKILL_VERSION = os.environ.get("WEREAD_SKILL_VERSION", "1.0.5")
 
 # Discord embed 的 description 上限是 4096 字符
 MAX_MEMO_CHARS = 600
