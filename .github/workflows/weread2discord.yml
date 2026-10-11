@@ -1,9 +1,10 @@
 name: weread2discord
 
 on:
+  # 定时触发已移至本机 OpenClaw 自动化（东京 09:00 调用 workflow_dispatch）。
+  # 原因：GitHub Actions 自带的 schedule 属 UTC 且常被延迟数小时甚至丢单，
+  # 无法保证在指定时间可靠运行。手动触发保持可用。
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
 jobs:
   sync:
     name: Sync
